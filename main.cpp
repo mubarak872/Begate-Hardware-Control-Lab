@@ -16,6 +16,27 @@
 
 HWND listView = nullptr, logBox = nullptr;
 
+std::wstring BusTypeName(STORAGE_BUS_TYPE bus) {
+    switch (bus) {
+    case BusTypeScsi: return L"SCSI";
+    case BusTypeAtapi: return L"ATAPI";
+    case BusTypeAta: return L"ATA/SATA";
+    case BusType1394: return L"IEEE 1394";
+    case BusTypeSsa: return L"SSA";
+    case BusTypeFibre: return L"Fibre Channel";
+    case BusTypeUsb: return L"USB";
+    case BusTypeRAID: return L"RAID";
+    case BusTypeiScsi: return L"iSCSI";
+    case BusTypeSas: return L"SAS";
+    case BusTypeSata: return L"SATA";
+    case BusTypeSd: return L"SD";
+    case BusTypeMmc: return L"MMC";
+    case BusTypeVirtual: return L"Virtual";
+    case BusTypeFileBackedVirtual: return L"File-backed virtual";
+    default: return L"Unknown / driver-reported";
+    }
+}
+
 void Log(const std::wstring& message) {
     if (!logBox) return;
     int n = GetWindowTextLengthW(logBox);
@@ -97,8 +118,11 @@ void RefreshDrives() {
 
             const std::wstring number = std::to_wstring(index);
             const std::wstring model = DescriptorString(buffer, bytesReturned, descriptor->ProductIdOffset);
+            const std::wstring vendor = DescriptorString(buffer, bytesReturned, descriptor->VendorIdOffset);
+            const std::wstring firmware = DescriptorString(buffer, bytesReturned, descriptor->ProductRevisionOffset);
             const std::wstring label = (model.empty() ? L"Unknown model" : model) + L" | " + capacity.str();
             const std::wstring serial = DescriptorString(buffer, bytesReturned, descriptor->SerialNumberOffset);
+            const std::wstring bus = BusTypeName(descriptor->BusType);
 
             LVITEMW item{};
             item.mask = LVIF_TEXT;
@@ -107,6 +131,9 @@ void RefreshDrives() {
             const int row = ListView_InsertItem(listView, &item);
             ListView_SetItemText(listView, row, 1, const_cast<LPWSTR>(label.c_str()));
             ListView_SetItemText(listView, row, 2, const_cast<LPWSTR>(serial.c_str()));
+            ListView_SetItemText(listView, row, 3, const_cast<LPWSTR>(vendor.c_str()));
+            ListView_SetItemText(listView, row, 4, const_cast<LPWSTR>(firmware.c_str()));
+            ListView_SetItemText(listView, row, 5, const_cast<LPWSTR>(bus.c_str()));
         }
         CloseHandle(drive);
     }
@@ -271,13 +298,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         ListView_InsertColumn(listView, 0, &column);
         column.pszText = const_cast<LPWSTR>(L"Model / Capacity"); column.cx = 430;
         ListView_InsertColumn(listView, 1, &column);
-        column.pszText = const_cast<LPWSTR>(L"Serial"); column.cx = 250;
+        column.pszText = const_cast<LPWSTR>(L"Serial"); column.cx = 180;
         ListView_InsertColumn(listView, 2, &column);
+        column.pszText = const_cast<LPWSTR>(L"Vendor"); column.cx = 120;
+        ListView_InsertColumn(listView, 3, &column);
+        column.pszText = const_cast<LPWSTR>(L"Firmware / Revision"); column.cx = 150;
+        ListView_InsertColumn(listView, 4, &column);
+        column.pszText = const_cast<LPWSTR>(L"Bus / Interface"); column.cx = 150;
+        ListView_InsertColumn(listView, 5, &column);
 
         logBox = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
             12, 322, 850, 200, window, (HMENU)4, nullptr, nullptr);
-        Log(L"Begate Hardware Control Lab — read-only ATA diagnostics prototype.");
+        Log(L"Begate Hardware Control Lab — device inventory and read-only ATA diagnostics.");
+        Log(L"Tip: double-click a drive to run IDENTIFY. Select a drive before using SMART.");
         Log(L"Safety: no sector writes, firmware writes, head-disable, or service-area commands are implemented.");
         Log(L"Advanced head control is drive-family/firmware-specific and is not inferred from standard ATA.");
         RefreshDrives();
@@ -288,6 +322,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (LOWORD(wParam) == 2) IdentifySelectedDrive();
         if (LOWORD(wParam) == 5) ReadSmartSelectedDrive();
         return 0;
+    case WM_NOTIFY: {
+        const NMHDR* header = reinterpret_cast<const NMHDR*>(lParam);
+        if (header && header->hwndFrom == listView && header->code == NM_DBLCLK) {
+            IdentifySelectedDrive();
+            return 0;
+        }
+        break;
+    }
     case WM_SIZE: {
         const int width = LOWORD(lParam), height = HIWORD(lParam);
         if (listView) MoveWindow(listView, 12, 52, std::max(400, width - 24), std::max(100, height - 280), TRUE);
