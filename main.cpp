@@ -62,7 +62,8 @@ void RefreshDrives() {
 
     for (DWORD index = 0; index < 32; ++index) {
         const std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(index);
-        HANDLE drive = CreateFileW(path.c_str(), 0,
+        // Request read access so IOCTL_DISK_GET_LENGTH_INFO can return the disk size.
+        HANDLE drive = CreateFileW(path.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
         if (drive == INVALID_HANDLE_VALUE) continue;
 
@@ -80,7 +81,9 @@ void RefreshDrives() {
             ULONGLONG capacityBytes = 0;
             DWORD lengthReturned = 0;
             if (DeviceIoControl(drive, IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0,
-                    &lengthInfo, sizeof(lengthInfo), &lengthReturned, nullptr)) {
+                    &lengthInfo, sizeof(lengthInfo), &lengthReturned, nullptr)
+                && lengthReturned >= sizeof(GET_LENGTH_INFORMATION)
+                && lengthInfo.Length.QuadPart > 0) {
                 capacityBytes = (ULONGLONG)lengthInfo.Length.QuadPart;
             }
 
