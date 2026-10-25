@@ -1,6 +1,10 @@
-#define UNICODE
-#define _UNICODE
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
+#include <ntddscsi.h>
+#include <cstddef>
+#include <cstring>
 #include <winioctl.h>
 #include <commctrl.h>
 #include <string>
@@ -102,6 +106,80 @@ void RefreshDrives() {
     Log(L"Drive list refreshed using Windows storage-property queries.");
 }
 
+bool SendAtaRead512(HANDLE drive, BYTE command, BYTE features, BYTE sectorCount,
+                    BYTE lbaMid, BYTE lbaHigh, BYTE* output, DWORD& error) {
+    struct AtaPacket {
+        ATA_PASS_THROUGH_EX passThrough;
+        ULONG alignmentFiller;
+        BYTE data[512];
+    } packet{};
+    packet.passThrough.Length = sizeof(ATA_PASS_THROUGH_EX);
+    packet.passThrough.AtaFlags = ATA_FLAGS_DATA_IN;
+    packet.passThrough.DataTransferLength = sizeof(packet.data);
+    packet.passThrough.TimeOutValue = 15;
+    packet.passThrough.DataBufferOffset = offsetof(AtaPacket, data);
+    packet.passThrough.CurrentTaskFile[0] = features;
+    packet.passThrough.CurrentTaskFile[1] = sectorCount;
+    packet.passThrough.CurrentTaskFile[2] = 0;
+    packet.passThrough.CurrentTaskFile[3] = lbaMid;
+    packet.passThrough.CurrentTaskFile[4] = lbaHigh;
+    packet.passThrough.CurrentTaskFile[6] = command;
+    DWORD returned = 0;
+    const BOOL ok = DeviceIoControl(drive, IOCTL_ATA_PASS_THROUGH,
+        &packet, sizeof(packet), &packet, sizeof(packet), &returned, nullptr);
+    error = ok ? ERROR_SUCCESS : GetLastError();
+    if (ok) memcpy(output, packet.data, sizeof(packet.data));
+    return ok != FALSE;
+}
+
+void ReadSmartSelectedDrive() {
+    const int row = ListView_GetNextItem(listView, -1, LVNI_SELECTED);
+    if (row < 0) {
+        MessageBoxW(nullptr, L"Select a physical drive first.", L"Begate Diagnostics", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t numberText[32]{};
+    ListView_GetItemText(listView, row, 0, numberText, 32);
+    const DWORD index = (DWORD)_wtoi(numberText);
+    const std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(index);
+    HANDLE drive = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (drive == INVALID_HANDLE_VALUE) {
+        Log(L"Could not open selected drive for SMART read. Win32 error: " + std::to_wstring(GetLastError()));
+        return;
+    }
+
+    BYTE data[512]{};
+    DWORD error = 0;
+    // ATA SMART READ DATA (B0h / D0h). This does not enable SMART or write user sectors.
+    const bool ok = SendAtaRead512(drive, 0xB0, 0xD0, 1, 0x4F, 0xC2, data, error);
+    CloseHandle(drive);
+    if (!ok) {
+        Log(L"SMART READ DATA was rejected. Win32 error: " + std::to_wstring(error)
+            + L". SMART may be unsupported, disabled, or blocked by the controller/driver.");
+        return;
+    }
+
+    std::wstringstream report;
+    report << L"READ-ONLY SMART ATTRIBUTE DATA\\r\\nPhysicalDrive: " << index << L"\\r\\n";
+    int found = 0;
+    for (int offset = 2; offset + 12 <= 362; offset += 12) {
+        const BYTE id = data[offset];
+        if (id == 0) continue;
+        report << L"ID " << std::setw(3) << std::setfill(L'0') << (int)id
+               << L" | Current " << std::setw(3) << (int)data[offset + 3]
+               << L" | Worst " << std::setw(3) << (int)data[offset + 4] << L" | Raw ";
+        for (int j = 9; j >= 4; --j)
+            report << std::hex << std::setw(2) << std::setfill(L'0') << (int)data[offset + j];
+        report << std::dec << L"\\r\\n";
+        ++found;
+    }
+    if (!found) report << L"No populated SMART attributes were found in the returned sector.\\r\\n";
+    report << L"Raw values are vendor-specific; do not interpret them as a universal health score.";
+    Log(report.str());
+    MessageBoxW(nullptr, report.str().c_str(), L"SMART Read Results", MB_OK | MB_ICONINFORMATION);
+}
+
 void IdentifySelectedDrive() {
     const int row = ListView_GetNextItem(listView, -1, LVNI_SELECTED);
     if (row < 0) {
@@ -172,6 +250,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             12, 12, 130, 30, window, (HMENU)1, nullptr, nullptr);
         CreateWindowW(L"BUTTON", L"Identify Selected (Read-only)", WS_CHILD | WS_VISIBLE,
             152, 12, 230, 30, window, (HMENU)2, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Read SMART (Read-only)", WS_CHILD | WS_VISIBLE,
+            392, 12, 210, 30, window, (HMENU)5, nullptr, nullptr);
 
         listView = CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -190,13 +270,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         logBox = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
             12, 322, 850, 200, window, (HMENU)4, nullptr, nullptr);
-        Log(L"Begate Hardware Control Lab — ATA Explorer prototype.");
+        Log(L"Begate Hardware Control Lab — read-only ATA diagnostics prototype.");
+        Log(L"Safety: no sector writes, firmware writes, head-disable, or service-area commands are implemented.");
+        Log(L"Advanced head control is drive-family/firmware-specific and is not inferred from standard ATA.");
         RefreshDrives();
         return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wParam) == 1) RefreshDrives();
         if (LOWORD(wParam) == 2) IdentifySelectedDrive();
+        if (LOWORD(wParam) == 5) ReadSmartSelectedDrive();
         return 0;
     case WM_SIZE: {
         const int width = LOWORD(lParam), height = HIWORD(lParam);
