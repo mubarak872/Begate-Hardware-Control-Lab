@@ -88,8 +88,12 @@ void RefreshDrives() {
             }
 
             std::wstringstream capacity;
-            capacity << std::fixed << std::setprecision(1)
-                     << (double)capacityBytes / 1073741824.0 << L" GiB";
+            if (capacityBytes > 0) {
+                capacity << std::fixed << std::setprecision(1)
+                         << (double)capacityBytes / 1073741824.0 << L" GiB";
+            } else {
+                capacity << L"Capacity unavailable";
+            }
 
             const std::wstring number = std::to_wstring(index);
             const std::wstring model = DescriptorString(buffer, bytesReturned, descriptor->ProductIdOffset);
